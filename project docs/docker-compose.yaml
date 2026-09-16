@@ -1,0 +1,43 @@
+services:
+
+  mysql:
+    image: mysql:8.0
+    container_name: oec-mysql-db-dev
+    restart: unless-stopped
+
+    environment:
+      MYSQL_ROOT_PASSWORD: "OEC123@mysql-root"
+      MYSQL_USER: "OEC-db-team"
+      MYSQL_PASSWORD: "OEC123@mysql"
+
+    ports:
+      - "3306:3306"
+
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./one-enterorise1.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mysqladmin",
+          "ping",
+          "-h",
+          "localhost",
+          "-u",
+          "root",
+          "-pChangeThisRootPassword@123"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  mysql_data:
+    name: oec_mysql_data
