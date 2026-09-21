@@ -1,22 +1,19 @@
 terraform {
   required_version = ">= 1.6.0"
 
+  backend "s3" {
+    bucket = "oec-terraform-state"
+    key    = "oec-java-suite/rds/terraform.tfstate"
+    region = "us-east-1"
+  }
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
       version = "~> 6.0"
     }
   }
-}
-
-# ============================================================
-# PROVIDER
-# ============================================================
-
-provider "aws" {
-  region = var.aws_region
-}
-
+ }
 # ============================================================
 # VARIABLES
 # ============================================================
