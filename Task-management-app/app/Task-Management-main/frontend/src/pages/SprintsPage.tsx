@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { format, parseISO } from 'date-fns'
 import { Plus } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { toast } from 'sonner'
 import { apiCreateSprint, apiDeleteSprint, apiEditSprint, apiUpdateSprintStatus, fetchSprints, fetchTeams } from '@/api'
 import { EmptyState, ErrorState } from '@/components/common/EmptyState'

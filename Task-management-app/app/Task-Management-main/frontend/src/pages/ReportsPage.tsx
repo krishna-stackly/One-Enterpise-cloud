@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { countByStatus, projectProgress, teamProgress, teamsInProject } from '@/data/selectors'
 import { DashboardSkeleton } from '@/features/dashboard/DashboardSkeleton'
 import { useSession } from '@/stores/auth-store'
-import { STATUS_eETA } from '@/types'
+import { STATUS_META } from '@/types'
 
 const COLORS = ['#64748b', '#0284c7', '#4f46e5', '#dc2626', '#d97706', '#059669']
 
@@ -22,7 +22,7 @@ export function ReportsPage() {
   if (query.isError) return <ErrorState onRetry={() => query.refetch()} />
   const tasks = query.data ?? []
   const stats = countByStatus(tasks)
-  const pie = Object.entries(STATUS_eETA).map(([status, meta]) => ({
+  const pie = Object.entries(STATUS_META).map(([status, meta]) => ({
     name: meta.label,
     value: tasks.filter((task) => task.status === status).length,
   }))

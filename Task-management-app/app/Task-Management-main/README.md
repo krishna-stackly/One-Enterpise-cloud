@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Stackly — Project & Task Management
 
 Enterprise project and task management built around a strict work hierarchy:
@@ -175,6 +174,3 @@ Attachments store metadata/URLs only. `FileStorage` abstracts local disk (defaul
 ## License
 
 Proprietary — internal Stackly project.
-=======
-# Task-Management
->>>>>>> ab3ff575c4ed0e1b950097fc1925728abdcabffe

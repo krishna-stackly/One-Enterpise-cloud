@@ -146,7 +146,7 @@ function Sidebar() {
 }
 
 function Header() {
-  const { user, projectId, role, assignment } = useSession()
+  const { user, projectId, assignment } = useSession()
   const setProjectId = useAuthStore((s) => s.setProjectId)
   const logout = useAuthStore((s) => s.logout)
   const toggleSidebar = useUiStore((s) => s.toggleSidebar)

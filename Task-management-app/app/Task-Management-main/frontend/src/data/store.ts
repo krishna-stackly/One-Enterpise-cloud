@@ -483,23 +483,6 @@ export function createSubtasks(
   return created
 }
 
-function attachImages(
-  taskId: string,
-  uploadedBy: string,
-  images: { fileName: string; url: string; contentType: string; fileSize: number }[],
-) {
-  for (const image of images) {
-    addAttachmentMeta({
-      taskId,
-      fileName: image.fileName,
-      fileSize: image.fileSize,
-      contentType: image.contentType,
-      url: image.url,
-      uploadedBy,
-    })
-  }
-}
-
 export function markNotificationRead(id: string) {
   notifications = notifications.map((item) => (item.id === id ? { ...item, read: true } : item))
 }

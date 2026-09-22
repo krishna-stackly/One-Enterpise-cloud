@@ -5,7 +5,6 @@ import { assignmentsForUser, displayName, projectsForUser } from '@/data/selecto
 import { useSession } from '@/stores/auth-store'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { PasswordInput } from '@/components/common/PasswordInput'
 import { toast } from 'sonner'
