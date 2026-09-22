@@ -1,0 +1,59 @@
+# Dependencies
+node_modules/
+**/node_modules/
+.pnp
+.pnp.js
+
+# Build
+dist/
+build/
+**/target/
+*.class
+*.jar
+!**/src/**/target/
+backend/.mvn/wrapper/maven-wrapper.jar
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+*.pem
+*.p12
+*.jks
+
+# IDE
+.idea/
+*.iml
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test / coverage
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+
+# Uploads (local storage)
+uploads/
+backend/uploads/
+
+# OS
+desktop.ini
+
+# Misc
+*.tsbuildinfo
+.turbo
+.cache

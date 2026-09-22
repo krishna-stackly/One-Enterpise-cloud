@@ -1,0 +1,22 @@
+CREATE TABLE queries (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    project_id BIGINT NOT NULL,
+    team_id BIGINT NULL,
+    from_user_id BIGINT NOT NULL,
+    to_user_id BIGINT NOT NULL,
+    subject VARCHAR(200) NOT NULL,
+    body TEXT NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    parent_query_id BIGINT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    answered_at TIMESTAMP NULL,
+    CONSTRAINT fk_q_project FOREIGN KEY (project_id) REFERENCES projects (id),
+    CONSTRAINT fk_q_team FOREIGN KEY (team_id) REFERENCES teams (id),
+    CONSTRAINT fk_q_from FOREIGN KEY (from_user_id) REFERENCES users (id),
+    CONSTRAINT fk_q_to FOREIGN KEY (to_user_id) REFERENCES users (id),
+    CONSTRAINT fk_q_parent FOREIGN KEY (parent_query_id) REFERENCES queries (id),
+    INDEX idx_q_project (project_id),
+    INDEX idx_q_to (to_user_id),
+    INDEX idx_q_from (from_user_id),
+    INDEX idx_q_parent (parent_query_id)
+);

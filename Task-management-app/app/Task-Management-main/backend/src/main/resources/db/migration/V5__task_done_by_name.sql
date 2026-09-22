@@ -1,0 +1,2 @@
+﻿ALTER TABLE tasks
+    ADD COLUMN done_by_name VARCHAR(120) NULL;
