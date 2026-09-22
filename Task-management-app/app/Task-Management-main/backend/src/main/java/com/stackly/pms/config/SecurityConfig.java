@@ -1,8 +1,10 @@
 package com.stackly.pms.config;
 
 import com.stackly.pms.security.JwtAuthFilter;
+import java.util.Arrays;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
@@ -24,6 +26,9 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 @RequiredArgsConstructor
 public class SecurityConfig {
     private final JwtAuthFilter jwtAuthFilter;
+
+    @Value("${stackly.cors.allowed-origins:http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000}")
+    private String allowedOrigins;
 
     @Bean
     SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
@@ -53,12 +58,13 @@ public class SecurityConfig {
 
     @Bean
     CorsConfigurationSource corsConfigurationSource() {
+        List<String> origins = Arrays.stream(allowedOrigins.split(","))
+                .map(String::trim)
+                .filter(origin -> !origin.isEmpty())
+                .toList();
+
         CorsConfiguration config = new CorsConfiguration();
-        config.setAllowedOrigins(List.of(
-                "http://localhost:5173",
-                "http://127.0.0.1:5173",
-                "http://localhost:3000",
-                "http://127.0.0.1:3000"));
+        config.setAllowedOrigins(origins);
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         config.setAllowedHeaders(List.of("*"));
         config.setAllowCredentials(true);

@@ -21,6 +21,8 @@ server:
   port: ${SERVER_PORT:8080}
 
 stackly:
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000}
   jwt:
     secret: ${JWT_SECRET:replace_with_a_long_random_secret_at_least_64_characters_long_ok}
     access-expiration-ms: ${JWT_ACCESS_EXPIRATION_MS:900000}
