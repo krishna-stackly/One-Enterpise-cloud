@@ -1,4 +1,3 @@
-
 terraform {
   required_version = ">= 1.10.0"
 
@@ -22,48 +21,13 @@ provider "aws" {
   region = "us-east-1"
 }
 
-# ------------------------------------------------------------
-# DEFAULT VPC
-# ------------------------------------------------------------
-
-data "aws_vpc" "default" {
-  default = true
-}
-
-# ------------------------------------------------------------
-# DEFAULT PUBLIC SUBNET IN us-east-1a
-# ------------------------------------------------------------
-
-data "aws_subnets" "default_public_1a" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
-  }
-
-  filter {
-    name   = "availability-zone"
-    values = ["us-east-1a"]
-  }
-
-  # Select the default subnet for this AZ.
-  filter {
-    name   = "default-for-az"
-    values = ["true"]
-  }
-
-  # Require automatic public IPv4 assignment.
-  filter {
-    name   = "map-public-ip-on-launch"
-    values = ["true"]
-  }
-}
+# ============================================================
+# PROJECT / ENVIRONMENT
+# ============================================================
 
 locals {
-  # Fail validation clearly if no matching subnet exists.
-  subnet_id = try(
-    sort(data.aws_subnets.default_public_1a.ids)[0],
-    ""
-  )
+  project_name = "oec"
+  environment = "dev"
 
   common_tags = {
     Project     = "OEC"
@@ -74,14 +38,57 @@ locals {
   }
 }
 
+# ============================================================
+# READ NETWORKING INFORMATION FROM SSM PARAMETER STORE
+# ============================================================
+
 # ------------------------------------------------------------
+# VPC ID
+# SSM:
+# /oec/dev/network/vpc_id
+# ------------------------------------------------------------
+
+data "aws_ssm_parameter" "vpc_id" {
+  name = "/${local.project_name}/${local.environment}/network/vpc_id"
+}
+
+# ------------------------------------------------------------
+# PUBLIC SUBNET IDS
+# SSM:
+# /oec/dev/network/public_subnet_ids
+#
+# Example value:
+# subnet-0123456789abcdef0,subnet-0abcdef1234567890
+# ------------------------------------------------------------
+
+data "aws_ssm_parameter" "public_subnet_ids" {
+  name = "/${local.project_name}/${local.environment}/network/public_subnet_ids"
+}
+
+# ------------------------------------------------------------
+# Convert StringList into Terraform list
+# ------------------------------------------------------------
+
+locals {
+  vpc_id = data.aws_ssm_parameter.vpc_id.value
+
+  public_subnet_ids = split(
+    ",",
+    data.aws_ssm_parameter.public_subnet_ids.value
+  )
+
+  # Select first public subnet
+  subnet_id = local.public_subnet_ids[0]
+}
+
+# ============================================================
 # SECURITY GROUP
-# ------------------------------------------------------------
+# ============================================================
 
 resource "aws_security_group" "java_suite_sg" {
   name        = "oec-java-suite-shared-server-sg"
-  description = "Security group for Main ec2 of OEC"
-  vpc_id      = data.aws_vpc.default.id
+  description = "Security group for Main EC2 of OEC"
+  vpc_id      = local.vpc_id
 
   ingress {
     description = "SSH access"
@@ -104,22 +111,24 @@ resource "aws_security_group" "java_suite_sg" {
   })
 }
 
-# ------------------------------------------------------------
+# ============================================================
 # IAM ROLE FOR SESSION MANAGER
-# No EC2 key pair is configured.
-# ------------------------------------------------------------
+# ============================================================
 
 resource "aws_iam_role" "ec2_ssm_role" {
   name = "oec-java-suite-ec2-ssm-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
+
     Statement = [
       {
         Effect = "Allow"
+
         Principal = {
           Service = "ec2.amazonaws.com"
         }
+
         Action = "sts:AssumeRole"
       }
     ]
@@ -130,13 +139,22 @@ resource "aws_iam_role" "ec2_ssm_role" {
   })
 }
 
+# ------------------------------------------------------------
+# AmazonSSMManagedInstanceCore
+# ------------------------------------------------------------
+
 resource "aws_iam_role_policy_attachment" "ssm_managed_instance" {
   role       = aws_iam_role.ec2_ssm_role.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
+# ============================================================
+# INSTANCE PROFILE
+# ============================================================
+
 resource "aws_iam_instance_profile" "ec2_ssm_profile" {
   name = "oec-java-suite-ec2-ssm-profile"
+
   role = aws_iam_role.ec2_ssm_role.name
 
   tags = merge(local.common_tags, {
@@ -144,29 +162,67 @@ resource "aws_iam_instance_profile" "ec2_ssm_profile" {
   })
 }
 
-# ------------------------------------------------------------
+# ============================================================
 # EC2 INSTANCE
-# ------------------------------------------------------------
+# ============================================================
 
 resource "aws_instance" "java_suite_server" {
-  ami                    = "ami-0220d79f3f480ecf5"
-  instance_type          = "t3.large"
-  subnet_id              = local.subnet_id
-  vpc_security_group_ids = [aws_security_group.java_suite_sg.id]
 
-  # No EC2 key pair.
+  # ----------------------------------------------------------
+  # AMI
+  # ----------------------------------------------------------
+
+  ami = "ami-0220d79f3f480ecf5"
+
+  # ----------------------------------------------------------
+  # INSTANCE TYPE
+  # ----------------------------------------------------------
+
+  instance_type = "t3.large"
+
+  # ----------------------------------------------------------
+  # NETWORK
+  # ----------------------------------------------------------
+
+  # VPC comes indirectly through the Security Group.
+  #
+  # Subnet comes from:
+  # /oec/dev/network/public_subnet_ids
+  #
+  subnet_id = local.subnet_id
+
+  vpc_security_group_ids = [
+    aws_security_group.java_suite_sg.id
+  ]
+
+  # ----------------------------------------------------------
+  # PUBLIC IP
+  # ----------------------------------------------------------
+
   associate_public_ip_address = true
 
-  # Session Manager access.
+  # ----------------------------------------------------------
+  # IAM / SSM
+  # ----------------------------------------------------------
+
   iam_instance_profile = aws_iam_instance_profile.ec2_ssm_profile.name
 
-  # bootstrap.sh must be in the same directory as this .tf file.
-  user_data                   = file("${path.module}/bootstrap.sh")
+  # ----------------------------------------------------------
+  # BOOTSTRAP
+  # ----------------------------------------------------------
+
+  user_data = file("${path.module}/bootstrap.sh")
+
   user_data_replace_on_change = true
 
+  # ----------------------------------------------------------
+  # ROOT VOLUME
+  # ----------------------------------------------------------
+
   root_block_device {
-    volume_size           = 100
-    volume_type           = "gp3"
+    volume_size = 100
+    volume_type = "gp3"
+
     encrypted             = true
     delete_on_termination = true
 
@@ -175,32 +231,53 @@ resource "aws_instance" "java_suite_server" {
     })
   }
 
+  # ----------------------------------------------------------
+  # IMDS
+  # ----------------------------------------------------------
+
   metadata_options {
     http_endpoint               = "enabled"
     http_tokens                 = "required"
     http_put_response_hop_limit = 1
   }
 
+  # ----------------------------------------------------------
+  # TAGS
+  # ----------------------------------------------------------
+
   tags = merge(local.common_tags, {
     Name = "Main ec2 of OEC"
     Role = "Shared Development Server"
   })
 
+  # ----------------------------------------------------------
+  # Ensure IAM role attachment exists before EC2
+  # ----------------------------------------------------------
+
   depends_on = [
     aws_iam_role_policy_attachment.ssm_managed_instance
   ]
 
+  # ----------------------------------------------------------
+  # VALIDATION
+  # ----------------------------------------------------------
+
   lifecycle {
     precondition {
-      condition     = local.subnet_id != ""
-      error_message = "No default subnet with automatic public IPv4 assignment was found in us-east-1a. Check the default VPC and subnet configuration."
+      condition     = local.vpc_id != ""
+      error_message = "VPC ID was not found in SSM Parameter Store."
+    }
+
+    precondition {
+      condition     = length(local.public_subnet_ids) > 0 && local.subnet_id != ""
+      error_message = "No public subnet IDs were found in SSM Parameter Store."
     }
   }
 }
 
-# ------------------------------------------------------------
+# ============================================================
 # OUTPUTS
-# ------------------------------------------------------------
+# ============================================================
 
 output "instance_id" {
   description = "EC2 instance ID"
@@ -228,13 +305,18 @@ output "public_dns" {
 }
 
 output "vpc_id" {
-  description = "Default VPC ID"
-  value       = data.aws_vpc.default.id
+  description = "VPC ID read from SSM"
+  value       = local.vpc_id
 }
 
 output "subnet_id" {
-  description = "Selected default subnet in us-east-1a"
+  description = "Public subnet ID read from SSM"
   value       = local.subnet_id
+}
+
+output "public_subnet_ids" {
+  description = "All public subnet IDs read from SSM"
+  value       = local.public_subnet_ids
 }
 
 output "security_group_id" {
