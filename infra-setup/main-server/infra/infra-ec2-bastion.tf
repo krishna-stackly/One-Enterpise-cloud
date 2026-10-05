@@ -11,7 +11,7 @@ terraform {
   backend "s3" {
     bucket       = "oec-terraform-state"
     key          = "oec-java-suite/dev/shared-server/terraform.tfstate"
-    region       = "ap-south-2"
+    region       = "us-east-1"
     encrypt      = true
     use_lockfile = true
   }
