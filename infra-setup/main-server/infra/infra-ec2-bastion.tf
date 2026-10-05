@@ -281,52 +281,52 @@ resource "aws_instance" "java_suite_server" {
 # OUTPUTS
 # ============================================================
 
-output "instance_id" {
-  description = "EC2 instance ID"
-  value       = aws_instance.java_suite_server.id
-}
+# output "instance_id" {
+#   description = "EC2 instance ID"
+#   value       = aws_instance.java_suite_server.id
+# }
 
-output "instance_name" {
-  description = "EC2 instance Name tag"
-  value       = aws_instance.java_suite_server.tags["Name"]
-}
+# output "instance_name" {
+#   description = "EC2 instance Name tag"
+#   value       = aws_instance.java_suite_server.tags["Name"]
+# }
 
-output "instance_type" {
-  description = "EC2 instance type"
-  value       = aws_instance.java_suite_server.instance_type
-}
+# output "instance_type" {
+#   description = "EC2 instance type"
+#   value       = aws_instance.java_suite_server.instance_type
+# }
 
-output "public_ip" {
-  description = "Public IPv4 address"
-  value       = aws_instance.java_suite_server.public_ip
-}
+# output "public_ip" {
+#   description = "Public IPv4 address"
+#   value       = aws_instance.java_suite_server.public_ip
+# }
 
-output "public_dns" {
-  description = "Public DNS name"
-  value       = aws_instance.java_suite_server.public_dns
-}
+# output "public_dns" {
+#   description = "Public DNS name"
+#   value       = aws_instance.java_suite_server.public_dns
+# }
 
-output "vpc_id" {
-  description = "VPC ID read from SSM"
-  value       = local.vpc_id
-}
+# output "vpc_id" {
+#   description = "VPC ID read from SSM"
+#   value       = local.vpc_id
+# }
 
-output "subnet_id" {
-  description = "Public subnet ID read from SSM"
-  value       = local.subnet_id
-}
+# output "subnet_id" {
+#   description = "Public subnet ID read from SSM"
+#   value       = local.subnet_id
+# }
 
-output "public_subnet_ids" {
-  description = "All public subnet IDs read from SSM"
-  value       = local.public_subnet_ids
-}
+# output "public_subnet_ids" {
+#   description = "All public subnet IDs read from SSM"
+#   value       = local.public_subnet_ids
+# }
 
-output "security_group_id" {
-  description = "Dedicated EC2 security group ID"
-  value       = aws_security_group.java_suite_sg.id
-}
+# output "security_group_id" {
+#   description = "Dedicated EC2 security group ID"
+#   value       = aws_security_group.java_suite_sg.id
+# }
 
-output "ssm_instance_profile" {
-  description = "IAM instance profile for Session Manager"
-  value       = aws_iam_instance_profile.ec2_ssm_profile.name
-}
+# output "ssm_instance_profile" {
+#   description = "IAM instance profile for Session Manager"
+#   value       = aws_iam_instance_profile.ec2_ssm_profile.name
+# }
