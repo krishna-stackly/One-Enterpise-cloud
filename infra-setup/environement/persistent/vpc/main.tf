@@ -1,5 +1,5 @@
 module "vpc" {
-  source = "git::https://github.com/krishna-stackly/ERP-Terraform.git//modules/vpc/aws?ref=main"
+  source = "git::https://github.com/krishna-stackly/One-Enterpise-cloud.git//infra-setup/modules/vpc/aws?ref=main"
   # once you cut a release tag, switch to: ?ref=vpc-v1.0.0
 
   ############################################
