@@ -179,6 +179,7 @@ resource "aws_instance" "java_suite_server" {
   # ----------------------------------------------------------
 
   instance_type = "t3.large"
+  key_name = "oec-admin-key"
 
   # ----------------------------------------------------------
   # NETWORK
