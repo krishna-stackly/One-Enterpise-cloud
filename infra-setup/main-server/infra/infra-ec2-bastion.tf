@@ -211,7 +211,9 @@ resource "aws_instance" "java_suite_server" {
   # BOOTSTRAP
   # ----------------------------------------------------------
 
-  user_data = file("${path.module}/bootstrap.sh")
+  user_data = base64gzip(
+    file("${path.module}/bootstrap.sh")
+  )
 
   user_data_replace_on_change = true
 
