@@ -11,14 +11,14 @@ terraform {
   backend "s3" {
     bucket       = "oec-terraform-state"
     key          = "oec-java-suite/dev/shared-server/terraform.tfstate"
-    region       = "us-east-1"
+    region       = "ap-south-2"
     encrypt      = true
     use_lockfile = true
   }
 }
 
 provider "aws" {
-  region = "us-east-1"
+  region = "ap-south-2"
 }
 
 # ============================================================
