@@ -7,53 +7,77 @@ umask 027
 # ============================================================
 # OEC Java Suite - EC2 Bootstrap
 #
-# Supported:
-#   - RHEL 10
-#   - RHEL 9
-#   - Amazon Linux 2023
+# OS:
+#   RHEL 10 / RHEL 9
+#   Amazon Linux 2023
 #
-# Storage:
-#   Root EBS : managed by Terraform
-#   Data EBS : 150 GB
+# STORAGE DESIGN
 #
-# LVM:
-#   Docker     : 60 GB
-#   PostgreSQL : 50 GB
-#   Jenkins    : 20 GB
-#   Free       : remaining VG space
+#   Existing Root EBS: 100 GB
 #
-# Does not:
+#   /var/lib/docker
+#       Hard quota: 40 GB
+#
+#   /srv/jenkins
+#       Hard quota: 10 GB
+#
+#   Remaining root filesystem:
+#       Available for OS / applications / future use
+#
+# IMPORTANT:
+#   - No secondary EBS volume required
+#   - Does NOT partition the root disk
+#   - Does NOT format the root filesystem
+#   - Uses XFS project quotas
+#
+# DOES NOT:
 #   - Install SSM
-#   - Deploy PostgreSQL
-#   - Deploy Jenkins
+#   - Install PostgreSQL
+#   - Install Jenkins application
 #   - Deploy Java/TM application
-#   - Modify root disk
+#
+# DOES:
+#   - Install required packages
+#   - Configure XFS project quotas
+#   - Install Docker
+#   - Configure Docker
+#   - Set Docker data directory
+#   - Create Jenkins directory
+#   - Configure Jenkins directory quota
+#   - Enable Docker
+#   - Verify configuration
 # ============================================================
 
-VG="OECDataVG"
-
-DOCKER_LV="lv_docker"
-POSTGRES_LV="lv_postgres"
-JENKINS_LV="lv_jenkins"
-
-DOCKER_SIZE="60G"
-POSTGRES_SIZE="50G"
-JENKINS_SIZE="20G"
+# ------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------
 
 DOCKER_MOUNT="/var/lib/docker"
-POSTGRES_MOUNT="/srv/postgres-data"
-JENKINS_MOUNT="/srv/jenkins"
+JENKINS_HOME="/srv/jenkins"
+
+DOCKER_QUOTA_GB=40
+JENKINS_QUOTA_GB=10
+
+DOCKER_PROJECT_ID=1001
+JENKINS_PROJECT_ID=1002
 
 LOG="/var/log/oec-bootstrap.log"
-DISK_WAIT_SECONDS=180
+
+# ------------------------------------------------------------
+# Logging / error handling
+# ------------------------------------------------------------
 
 mkdir -p "$(dirname "$LOG")"
+
 exec > >(tee -a "$LOG") 2>&1
 
 trap '
 rc=$?
-echo "[ERROR] Bootstrap failed at line ${LINENO}. Exit code: ${rc}"
-echo "[ERROR] Check ${LOG}"
+echo
+echo "[ERROR] Bootstrap failed."
+echo "[ERROR] Line      : ${LINENO}"
+echo "[ERROR] Exit code : ${rc}"
+echo "[ERROR] Log       : ${LOG}"
 exit "$rc"
 ' ERR
 
@@ -67,43 +91,70 @@ die() {
 }
 
 # ------------------------------------------------------------
+# Root check
+# ------------------------------------------------------------
+
+[[ "$EUID" -eq 0 ]] ||
+    die "Bootstrap must run as root."
+
+# ------------------------------------------------------------
 # OS detection
 # ------------------------------------------------------------
 
-[[ "$EUID" -eq 0 ]] || die "Bootstrap must run as root."
-[[ -r /etc/os-release ]] || die "Cannot determine operating system."
+[[ -r /etc/os-release ]] ||
+    die "Cannot determine operating system."
 
 source /etc/os-release
 
 case "$ID" in
+
     rhel)
         OS_TYPE="rhel"
         ;;
+
     amzn)
         [[ "$VERSION_ID" == 2023* ]] ||
             die "Unsupported Amazon Linux version: $VERSION_ID"
+
         OS_TYPE="amazon"
         ;;
+
     *)
         die "Unsupported OS: ${ID} ${VERSION_ID}"
         ;;
+
 esac
 
 log "OS: ${PRETTY_NAME}"
 
 # ------------------------------------------------------------
-# Required packages
+# Verify root filesystem
+# ------------------------------------------------------------
+
+ROOT_SOURCE=$(findmnt -n -o SOURCE /)
+ROOT_FSTYPE=$(findmnt -n -o FSTYPE /)
+
+[[ -n "$ROOT_SOURCE" ]] ||
+    die "Cannot determine root filesystem."
+
+log "Root filesystem: ${ROOT_SOURCE}"
+log "Root filesystem type: ${ROOT_FSTYPE}"
+
+# XFS is required for project quotas.
+[[ "$ROOT_FSTYPE" == "xfs" ]] ||
+    die "Root filesystem must be XFS for this bootstrap. Detected: ${ROOT_FSTYPE}"
+
+# ------------------------------------------------------------
+# Install required packages
 # ------------------------------------------------------------
 
 log "Installing required packages"
 
 dnf install -y \
-    lvm2 \
-    xfsprogs \
-    parted \
     util-linux \
     grep \
-    gawk
+    gawk \
+    xfsprogs
 
 # RHEL requires Docker repository tools.
 if [[ "$OS_TYPE" == "rhel" ]]; then
@@ -111,258 +162,214 @@ if [[ "$OS_TYPE" == "rhel" ]]; then
 fi
 
 # ------------------------------------------------------------
-# Root disk detection
+# Verify quota tools
 # ------------------------------------------------------------
 
-ROOT_SOURCE=$(findmnt -n -o SOURCE /)
+command -v xfs_quota >/dev/null 2>&1 ||
+    die "xfs_quota command is not available."
 
-[[ -n "$ROOT_SOURCE" ]] ||
-    die "Cannot determine root filesystem."
+# ------------------------------------------------------------
+# Determine root mount device
+# ------------------------------------------------------------
 
-ROOT_DISK=""
+ROOT_DEVICE=$(findmnt -n -o SOURCE /)
 
-if [[ "$ROOT_SOURCE" == /dev/mapper/* ]]; then
+log "Root device: ${ROOT_DEVICE}"
 
-    ROOT_VG=$(
-        lvs --noheadings -o vg_name "$ROOT_SOURCE" 2>/dev/null |
-        xargs
-    )
+# ------------------------------------------------------------
+# Check existing Docker / Jenkins directories
+# ------------------------------------------------------------
 
-    [[ -n "$ROOT_VG" ]] ||
-        die "Cannot determine root volume group."
+mkdir -p "$DOCKER_MOUNT"
+mkdir -p "$JENKINS_HOME"
 
-    ROOT_PV=$(
-        pvs --noheadings -o pv_name,vg_name 2>/dev/null |
-        awk -v vg="$ROOT_VG" '$2 == vg {print $1; exit}'
-    )
+# ------------------------------------------------------------
+# Configure XFS project quota
+# ------------------------------------------------------------
 
-    [[ -n "$ROOT_PV" ]] ||
-        die "Cannot determine root physical volume."
+log "Configuring XFS project quota"
 
-    ROOT_DISK=$(lsblk -ndo PKNAME "$ROOT_PV" | head -n 1)
+# Determine root mountpoint.
+ROOT_MOUNT="/"
+
+# Check whether project quotas are already enabled.
+ROOT_MOUNT_OPTIONS=$(findmnt -n -o OPTIONS /)
+
+log "Current root mount options: ${ROOT_MOUNT_OPTIONS}"
+
+# ------------------------------------------------------------
+# Add project quota option to /etc/fstab
+# ------------------------------------------------------------
+
+FSTAB_ENTRY=$(awk '$1 !~ /^#/ && $2 == "/" {print; exit}' /etc/fstab || true)
+
+if [[ -z "$FSTAB_ENTRY" ]]; then
+
+    log "No root entry found in /etc/fstab. Skipping fstab modification."
 
 else
 
-    ROOT_DISK=$(lsblk -ndo PKNAME "$ROOT_SOURCE" | head -n 1)
+    # Only add prjquota if not already present.
+    if ! echo "$FSTAB_ENTRY" | grep -qE '(^|,)prjquota(,|$)'; then
 
-fi
+        log "Adding prjquota to root filesystem mount options."
 
-[[ -n "$ROOT_DISK" ]] ||
-    die "Could not determine root disk."
+        ROOT_FSTAB_DEVICE=$(echo "$FSTAB_ENTRY" | awk '{print $1}')
+        ROOT_FSTAB_FS=$(echo "$FSTAB_ENTRY" | awk '{print $3}')
+        ROOT_FSTAB_DUMP=$(echo "$FSTAB_ENTRY" | awk '{print $5}')
+        ROOT_FSTAB_PASS=$(echo "$FSTAB_ENTRY" | awk '{print $6}')
 
-ROOT_DISK="/dev/$ROOT_DISK"
+        ROOT_FSTAB_OPTIONS=$(echo "$FSTAB_ENTRY" | awk '{print $4}')
 
-log "Root disk: $ROOT_DISK"
+        NEW_ROOT_OPTIONS="${ROOT_FSTAB_OPTIONS},prjquota"
 
-# ------------------------------------------------------------
-# Find additional EBS disk
-# ------------------------------------------------------------
+        # Remove duplicate prjquota if somehow already present.
+        NEW_ROOT_OPTIONS=$(echo "$NEW_ROOT_OPTIONS" |
+            sed 's/,,*/,/g')
 
-log "Waiting for additional EBS disk..."
+        # Create backup before modification.
+        cp -a /etc/fstab "/etc/fstab.oec-backup.$(date +%Y%m%d%H%M%S)"
 
-DATA_DISK=""
+        # Replace only the root filesystem entry.
+        awk -v device="$ROOT_FSTAB_DEVICE" \
+            -v fs="$ROOT_FSTAB_FS" \
+            -v opts="$NEW_ROOT_OPTIONS" \
+            -v dump="$ROOT_FSTAB_DUMP" \
+            -v pass="$ROOT_FSTAB_PASS" '
+            BEGIN {OFS="\t"}
+            $1 == device && $2 == "/" {
+                print device, "/", fs, opts, dump, pass
+                next
+            }
+            {print}
+            ' /etc/fstab > /etc/fstab.oec.new
 
-for ((elapsed=0; elapsed<DISK_WAIT_SECONDS; elapsed+=5)); do
+        mv /etc/fstab.oec.new /etc/fstab
 
-    for candidate in $(lsblk -dnpo NAME,TYPE | awk '$2=="disk" {print $1}'); do
-
-        [[ "$candidate" == "$ROOT_DISK" ]] && continue
-
-        # Skip disks with mounted filesystems.
-        if lsblk -npo MOUNTPOINT "$candidate" |
-            grep -qvE '^[[:space:]]*$'; then
-            continue
-        fi
-
-        # Skip existing LVM physical volumes.
-        if pvs "$candidate" >/dev/null 2>&1; then
-            continue
-        fi
-
-        # Skip disks that already contain partitions.
-        if lsblk -lnpo NAME,TYPE "$candidate" |
-            awk '$2=="part" {found=1} END {exit !found}'; then
-            continue
-        fi
-
-        DATA_DISK="$candidate"
-        break
-    done
-
-    [[ -n "$DATA_DISK" ]] && break
-
-    sleep 5
-    udevadm settle || true
-done
-
-[[ -n "$DATA_DISK" ]] ||
-    die "No unused secondary EBS disk found after ${DISK_WAIT_SECONDS}s."
-
-log "Data disk: $DATA_DISK"
-
-# ------------------------------------------------------------
-# Validate disk size
-# ------------------------------------------------------------
-
-DATA_DISK_BYTES=$(lsblk -bndo SIZE "$DATA_DISK")
-
-DATA_DISK_GIB=$(
-    awk -v bytes="$DATA_DISK_BYTES" \
-        'BEGIN {printf "%.0f", bytes/1024/1024/1024}'
-)
-
-log "Data disk size: ${DATA_DISK_GIB} GiB"
-
-(( DATA_DISK_GIB >= 130 )) ||
-    die "Data disk is only ${DATA_DISK_GIB} GiB. Expected approximately 150 GiB."
-
-# ------------------------------------------------------------
-# Existing LVM check
-# ------------------------------------------------------------
-
-EXPECTED_LVS=(
-    "$DOCKER_LV"
-    "$POSTGRES_LV"
-    "$JENKINS_LV"
-)
-
-EXISTING_LVS=0
-
-for lv in "${EXPECTED_LVS[@]}"; do
-    if lvs "${VG}/${lv}" >/dev/null 2>&1; then
-        EXISTING_LVS=$((EXISTING_LVS + 1))
-    fi
-done
-
-if (( EXISTING_LVS != 0 && EXISTING_LVS != 3 )); then
-    die "Partial LVM configuration detected: ${EXISTING_LVS}/3 LVs exist."
-fi
-
-# ------------------------------------------------------------
-# Create LVM
-# ------------------------------------------------------------
-
-if (( EXISTING_LVS == 0 )); then
-
-    log "Creating LVM on ${DATA_DISK}"
-
-    PART_COUNT=$(
-        lsblk -lnpo NAME,TYPE "$DATA_DISK" |
-        awk '$2=="part" {count++} END {print count+0}'
-    )
-
-    (( PART_COUNT == 0 )) ||
-        die "Data disk already contains partitions. Refusing to overwrite."
-
-    # Create GPT + LVM partition.
-    parted -s "$DATA_DISK" mklabel gpt
-    parted -s "$DATA_DISK" mkpart primary 1MiB 100%
-    parted -s "$DATA_DISK" set 1 lvm on
-
-    partprobe "$DATA_DISK"
-    udevadm settle
-
-    if [[ "$DATA_DISK" == /dev/nvme* ]]; then
-        DATA_PART="${DATA_DISK}p1"
     else
-        DATA_PART="${DATA_DISK}1"
+
+        log "prjquota is already configured in /etc/fstab."
+
     fi
-
-    for ((i=0; i<30; i++)); do
-        [[ -b "$DATA_PART" ]] && break
-        sleep 2
-        udevadm settle || true
-    done
-
-    [[ -b "$DATA_PART" ]] ||
-        die "Partition ${DATA_PART} was not created."
-
-    pvcreate "$DATA_PART"
-    vgcreate "$VG" "$DATA_PART"
-
-    lvcreate -L "$DOCKER_SIZE" \
-        -n "$DOCKER_LV" "$VG"
-
-    lvcreate -L "$POSTGRES_SIZE" \
-        -n "$POSTGRES_LV" "$VG"
-
-    lvcreate -L "$JENKINS_SIZE" \
-        -n "$JENKINS_LV" "$VG"
-
-    mkfs.xfs -f "/dev/${VG}/${DOCKER_LV}"
-    mkfs.xfs -f "/dev/${VG}/${POSTGRES_LV}"
-    mkfs.xfs -f "/dev/${VG}/${JENKINS_LV}"
-
-else
-    log "Existing complete LVM configuration found."
 fi
 
 # ------------------------------------------------------------
-# Verify LVs
+# Enable project quota on current root filesystem
 # ------------------------------------------------------------
 
-for lv in "${EXPECTED_LVS[@]}"; do
+if echo "$ROOT_MOUNT_OPTIONS" | grep -qE '(^|,)prjquota(,|$)'; then
 
-    DEVICE="/dev/${VG}/${lv}"
+    log "Project quota already active on root filesystem."
 
-    [[ -b "$DEVICE" ]] ||
-        die "Missing LV: $DEVICE"
+else
 
-    FSTYPE=$(blkid -s TYPE -o value "$DEVICE" || true)
+    log "Project quota is not currently active."
 
-    [[ "$FSTYPE" == "xfs" ]] ||
-        die "$DEVICE is not XFS."
+    # Try remounting with project quotas.
+    if mount -o remount,prjquota /; then
 
-done
+        log "Successfully enabled project quota using remount."
 
-# ------------------------------------------------------------
-# Mount points
-# ------------------------------------------------------------
+    else
 
-mkdir -p \
-    "$DOCKER_MOUNT" \
-    "$POSTGRES_MOUNT" \
-    "$JENKINS_MOUNT"
+        log "Current root filesystem cannot be remounted with prjquota."
+        log "A reboot is required to activate prjquota from /etc/fstab."
 
-# ------------------------------------------------------------
-# /etc/fstab
-# ------------------------------------------------------------
+        REBOOT_REQUIRED="true"
 
-add_fstab_entry() {
-
-    local device="$1"
-    local mountpoint="$2"
-    local uuid
-
-    uuid=$(blkid -s UUID -o value "$device")
-
-    [[ -n "$uuid" ]] ||
-        die "No UUID found for $device."
-
-    if ! awk \
-        -v mp="$mountpoint" \
-        '$1 !~ /^#/ && $2 == mp {found=1} END {exit found}' \
-        /etc/fstab
-    then
-        echo "UUID=${uuid} ${mountpoint} xfs defaults,nofail 0 0" \
-            >> /etc/fstab
     fi
-}
-
-add_fstab_entry \
-    "/dev/${VG}/${DOCKER_LV}" \
-    "$DOCKER_MOUNT"
-
-add_fstab_entry \
-    "/dev/${VG}/${POSTGRES_LV}" \
-    "$POSTGRES_MOUNT"
-
-add_fstab_entry \
-    "/dev/${VG}/${JENKINS_LV}" \
-    "$JENKINS_MOUNT"
+fi
 
 # ------------------------------------------------------------
-# Docker
+# Verify project quota support
+# ------------------------------------------------------------
+
+ROOT_MOUNT_OPTIONS=$(findmnt -n -o OPTIONS /)
+
+if ! echo "$ROOT_MOUNT_OPTIONS" | grep -qE '(^|,)prjquota(,|$)'; then
+
+    if [[ "${REBOOT_REQUIRED:-false}" == "true" ]]; then
+
+        log "============================================================"
+        log "REBOOT REQUIRED"
+        log "============================================================"
+        log
+        log "The root filesystem requires a reboot to activate prjquota."
+        log
+        log "After reboot, run this script again:"
+        log
+        log "    sudo ./bootstrap.sh"
+        log
+        log "No disk partitioning or formatting was performed."
+        log "============================================================"
+
+        exit 0
+
+    else
+
+        die "Project quota is not active on the root filesystem."
+
+    fi
+fi
+
+log "Project quota is active."
+
+# ------------------------------------------------------------
+# Create XFS project configuration
+# ------------------------------------------------------------
+
+log "Configuring Docker project"
+
+cat > /etc/projects <<EOF
+${DOCKER_PROJECT_ID}:${DOCKER_MOUNT}
+${JENKINS_PROJECT_ID}:${JENKINS_HOME}
+EOF
+
+cat > /etc/projid <<EOF
+docker:${DOCKER_PROJECT_ID}
+jenkins:${JENKINS_PROJECT_ID}
+EOF
+
+chmod 0644 /etc/projects /etc/projid
+
+# ------------------------------------------------------------
+# Initialize Docker project
+# ------------------------------------------------------------
+
+xfs_quota -x -c "project -s docker" / ||
+    die "Failed to initialize Docker XFS project."
+
+# ------------------------------------------------------------
+# Initialize Jenkins project
+# ------------------------------------------------------------
+
+xfs_quota -x -c "project -s jenkins" / ||
+    die "Failed to initialize Jenkins XFS project."
+
+# ------------------------------------------------------------
+# Apply Docker quota
+# ------------------------------------------------------------
+
+log "Applying ${DOCKER_QUOTA_GB} GB Docker quota"
+
+xfs_quota -x -c \
+    "limit -p bhard=${DOCKER_QUOTA_GB}g docker" \
+    / ||
+    die "Failed to apply Docker quota."
+
+# ------------------------------------------------------------
+# Apply Jenkins quota
+# ------------------------------------------------------------
+
+log "Applying ${JENKINS_QUOTA_GB} GB Jenkins quota"
+
+xfs_quota -x -c \
+    "limit -p bhard=${JENKINS_QUOTA_GB}g jenkins" \
+    / ||
+    die "Failed to apply Jenkins quota."
+
+# ------------------------------------------------------------
+# Docker installation
 # ------------------------------------------------------------
 
 log "Installing Docker"
@@ -382,34 +389,31 @@ if [[ "$OS_TYPE" == "rhel" ]]; then
             docker-buildx-plugin \
             docker-compose-plugin
 
+    else
+
+        log "Docker CE is already installed."
+
     fi
 
 else
 
     if ! rpm -q docker >/dev/null 2>&1; then
+
         dnf install -y docker
+
+    else
+
+        log "Docker is already installed."
+
     fi
 
 fi
 
 # ------------------------------------------------------------
-# Mount filesystems
+# Docker directory
 # ------------------------------------------------------------
 
-systemctl stop docker 2>/dev/null || true
-
-mount "$DOCKER_MOUNT" 2>/dev/null || true
-mount "$POSTGRES_MOUNT" 2>/dev/null || true
-mount "$JENKINS_MOUNT" 2>/dev/null || true
-
-mountpoint -q "$DOCKER_MOUNT" ||
-    mount "$DOCKER_MOUNT"
-
-mountpoint -q "$POSTGRES_MOUNT" ||
-    mount "$POSTGRES_MOUNT"
-
-mountpoint -q "$JENKINS_MOUNT" ||
-    mount "$JENKINS_MOUNT"
+mkdir -p "$DOCKER_MOUNT"
 
 # ------------------------------------------------------------
 # Docker configuration
@@ -425,44 +429,96 @@ EOF
 
 chmod 0644 /etc/docker/daemon.json
 
+# ------------------------------------------------------------
+# Jenkins directory
+# ------------------------------------------------------------
+
+mkdir -p "$JENKINS_HOME"
+
+chmod 0755 "$JENKINS_HOME"
+
+# ------------------------------------------------------------
+# Start Docker
+# ------------------------------------------------------------
+
 systemctl daemon-reload
-systemctl enable --now docker
+
+systemctl enable docker
+
+systemctl start docker
 
 systemctl is-active --quiet docker ||
     die "Docker failed to start."
 
 # ------------------------------------------------------------
+# Verify Docker root directory
+# ------------------------------------------------------------
+
+DOCKER_ROOT=$(docker info \
+    --format '{{.DockerRootDir}}' 2>/dev/null || true)
+
+[[ "$DOCKER_ROOT" == "$DOCKER_MOUNT" ]] ||
+    die "Docker root directory is '${DOCKER_ROOT}', expected '${DOCKER_MOUNT}'."
+
+# ------------------------------------------------------------
+# Verify quota configuration
+# ------------------------------------------------------------
+
+log "=============================================="
+log "Quota configuration"
+log "=============================================="
+
+echo
+echo "Docker quota:"
+xfs_quota -x -c "report -p" /
+
+echo
+echo "Jenkins quota:"
+xfs_quota -x -c "report -p" /
+
+# ------------------------------------------------------------
 # Final verification
 # ------------------------------------------------------------
 
+echo
 log "=============================================="
 log "BOOTSTRAP COMPLETE"
 log "=============================================="
 
 echo
-echo "Storage:"
-lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS
+echo "Root filesystem:"
+df -hT /
 
 echo
-echo "LVM:"
-vgs
-lvs -o vg_name,lv_name,lv_size,lv_path
-
-echo
-echo "Mounts:"
-df -hT \
-    "$DOCKER_MOUNT" \
-    "$POSTGRES_MOUNT" \
-    "$JENKINS_MOUNT"
+echo "Root filesystem mount options:"
+findmnt -n -o SOURCE,FSTYPE,OPTIONS /
 
 echo
 echo "Docker:"
-docker info --format 'Docker Root Dir: {{.DockerRootDir}}'
+docker info --format \
+    'Docker Root Dir: {{.DockerRootDir}}'
 
 echo
 echo "Docker Compose:"
 docker compose version
 
 echo
-log "PostgreSQL, Jenkins and Java/TM application were NOT deployed."
+echo "Docker directory:"
+du -sh "$DOCKER_MOUNT" 2>/dev/null || true
+
+echo
+echo "Jenkins directory:"
+du -sh "$JENKINS_HOME" 2>/dev/null || true
+
+echo
+echo "Configured limits:"
+echo "  Docker  : ${DOCKER_QUOTA_GB} GB"
+echo "  Jenkins : ${JENKINS_QUOTA_GB} GB"
+
+echo
+log "No secondary EBS volume was used."
+log "No disk partitioning was performed."
+log "PostgreSQL was NOT installed."
+log "Jenkins was NOT installed."
+log "Java/TM application was NOT deployed."
 log "Bootstrap completed successfully."
