@@ -1,3 +1,4 @@
+
 #!/usr/bin/env bash
 
 set -Eeuo pipefail
@@ -28,8 +29,6 @@ umask 027
 #   - Deploy Java/TM application
 #   - Modify root disk
 # ============================================================
-
-set -Eeuo pipefail
 
 VG="OECDataVG"
 
@@ -67,12 +66,8 @@ die() {
     exit 1
 }
 
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
-}
-
 # ------------------------------------------------------------
-# OS
+# OS detection
 # ------------------------------------------------------------
 
 [[ "$EUID" -eq 0 ]] || die "Bootstrap must run as root."
@@ -97,7 +92,7 @@ esac
 log "OS: ${PRETTY_NAME}"
 
 # ------------------------------------------------------------
-# Packages
+# Required packages
 # ------------------------------------------------------------
 
 log "Installing required packages"
@@ -108,9 +103,9 @@ dnf install -y \
     parted \
     util-linux \
     grep \
-    awk
+    gawk
 
-# RHEL requires Docker's repository tools.
+# RHEL requires Docker repository tools.
 if [[ "$OS_TYPE" == "rhel" ]]; then
     dnf install -y dnf-plugins-core
 fi
@@ -120,20 +115,29 @@ fi
 # ------------------------------------------------------------
 
 ROOT_SOURCE=$(findmnt -n -o SOURCE /)
-[[ -n "$ROOT_SOURCE" ]] || die "Cannot determine root filesystem."
+
+[[ -n "$ROOT_SOURCE" ]] ||
+    die "Cannot determine root filesystem."
 
 ROOT_DISK=""
 
 if [[ "$ROOT_SOURCE" == /dev/mapper/* ]]; then
 
-    ROOT_VG=$(lvs --noheadings -o vg_name "$ROOT_SOURCE" 2>/dev/null | xargs)
+    ROOT_VG=$(
+        lvs --noheadings -o vg_name "$ROOT_SOURCE" 2>/dev/null |
+        xargs
+    )
 
-    [[ -n "$ROOT_VG" ]] || die "Cannot determine root volume group."
+    [[ -n "$ROOT_VG" ]] ||
+        die "Cannot determine root volume group."
 
-    ROOT_PV=$(pvs --noheadings -o pv_name,vg_name 2>/dev/null |
-        awk -v vg="$ROOT_VG" '$2 == vg {print $1; exit}')
+    ROOT_PV=$(
+        pvs --noheadings -o pv_name,vg_name 2>/dev/null |
+        awk -v vg="$ROOT_VG" '$2 == vg {print $1; exit}'
+    )
 
-    [[ -n "$ROOT_PV" ]] || die "Cannot determine root physical volume."
+    [[ -n "$ROOT_PV" ]] ||
+        die "Cannot determine root physical volume."
 
     ROOT_DISK=$(lsblk -ndo PKNAME "$ROOT_PV" | head -n 1)
 
@@ -143,7 +147,8 @@ else
 
 fi
 
-[[ -n "$ROOT_DISK" ]] || die "Could not determine root disk."
+[[ -n "$ROOT_DISK" ]] ||
+    die "Could not determine root disk."
 
 ROOT_DISK="/dev/$ROOT_DISK"
 
@@ -297,6 +302,7 @@ fi
 # ------------------------------------------------------------
 
 for lv in "${EXPECTED_LVS[@]}"; do
+
     DEVICE="/dev/${VG}/${lv}"
 
     [[ -b "$DEVICE" ]] ||
@@ -306,6 +312,7 @@ for lv in "${EXPECTED_LVS[@]}"; do
 
     [[ "$FSTYPE" == "xfs" ]] ||
         die "$DEVICE is not XFS."
+
 done
 
 # ------------------------------------------------------------
@@ -329,7 +336,8 @@ add_fstab_entry() {
 
     uuid=$(blkid -s UUID -o value "$device")
 
-    [[ -n "$uuid" ]] || die "No UUID found for $device."
+    [[ -n "$uuid" ]] ||
+        die "No UUID found for $device."
 
     if ! awk \
         -v mp="$mountpoint" \
@@ -341,9 +349,17 @@ add_fstab_entry() {
     fi
 }
 
-add_fstab_entry "/dev/${VG}/${DOCKER_LV}" "$DOCKER_MOUNT"
-add_fstab_entry "/dev/${VG}/${POSTGRES_LV}" "$POSTGRES_MOUNT"
-add_fstab_entry "/dev/${VG}/${JENKINS_LV}" "$JENKINS_MOUNT"
+add_fstab_entry \
+    "/dev/${VG}/${DOCKER_LV}" \
+    "$DOCKER_MOUNT"
+
+add_fstab_entry \
+    "/dev/${VG}/${POSTGRES_LV}" \
+    "$POSTGRES_MOUNT"
+
+add_fstab_entry \
+    "/dev/${VG}/${JENKINS_LV}" \
+    "$JENKINS_MOUNT"
 
 # ------------------------------------------------------------
 # Docker
@@ -365,6 +381,7 @@ if [[ "$OS_TYPE" == "rhel" ]]; then
             containerd.io \
             docker-buildx-plugin \
             docker-compose-plugin
+
     fi
 
 else
