@@ -156,7 +156,7 @@ resource "aws_db_instance" "postgres" {
   ##########################################
 
   db_name  = "oecdb"
-  username = "oec-admin"
+  username = "oec_admin"
   password = "oec_dev_123"
   port     = 5432
 
