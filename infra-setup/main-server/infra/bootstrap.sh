@@ -522,3 +522,4 @@ log "PostgreSQL was NOT installed."
 log "Jenkins was NOT installed."
 log "Java/TM application was NOT deployed."
 log "Bootstrap completed successfully."
+#comment
