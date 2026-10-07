@@ -1,70 +1,47 @@
-
 #!/usr/bin/env bash
-
-# ============================================================
-# OEC Java Suite - EC2 Bootstrap
-#
-# Target:
-#   RHEL 10 x86_64
-#
-# Storage:
-#   Existing root EBS: 100 GB
-#
-#   /var/lib/docker  -> 40 GB dedicated XFS filesystem
-#   /srv/jenkins     -> 10 GB dedicated XFS filesystem
-#   /                -> remaining root capacity
-#
-# IMPORTANT:
-#   - No secondary EBS
-#   - No LVM
-#   - No physical repartitioning
-#   - No XFS project quotas
-#   - No reboot required
-#   - Uses filesystem-backed fixed-size XFS files
-#
-# Installs:
-#   - Docker CE
-#   - Docker Compose plugin
-#   - Java 21
-#   - Jenkins LTS
-#
-# Does NOT install:
-#   - SSM
-#   - PostgreSQL
-#   - TM application
-#   - Java application
-#
-# ============================================================
 
 set -Eeuo pipefail
 
+# ============================================================
+# OEC JAVA SUITE - EC2 BOOTSTRAP
+#
+# Target:
+#   RHEL 9/10
+#   Existing 100 GB root EBS
+#
+# Storage:
+#   Existing LVM root disk
+#   40 GB LV -> /var/lib/docker
+#   10 GB LV -> /srv/jenkins
+#
+# Services:
+#   Docker CE
+#   Docker Compose
+#   Java 21
+#   Jenkins LTS
+#
+# Does NOT install:
+#   SSM
+#   PostgreSQL
+#   TM application
+#   Java application
+#
+# Designed to be SAFE TO RE-RUN.
+# ============================================================
+
+set -Eeuo pipefail
 umask 027
-
-# ============================================================
-# Configuration
-# ============================================================
-
-DOCKER_DIR="/var/lib/docker"
-JENKINS_HOME="/srv/jenkins"
-
-DOCKER_IMAGE="/docker-data.img"
-JENKINS_IMAGE="/jenkins-data.img"
-
-DOCKER_SIZE="40G"
-JENKINS_SIZE="10G"
-
-DOCKER_MOUNT_OPTS="loop"
-JENKINS_MOUNT_OPTS="loop"
 
 LOG_FILE="/var/log/oec-bootstrap.log"
 
-# ============================================================
-# Logging
-# ============================================================
+DOCKER_MOUNT="/var/lib/docker"
+JENKINS_MOUNT="/srv/jenkins"
 
-mkdir -p "$(dirname "$LOG_FILE")"
+DOCKER_LV="/dev/RootVG/dockerVol"
+JENKINS_LV="/dev/RootVG/jenkinsVol"
 
-exec > >(tee -a "$LOG_FILE") 2>&1
+DOCKER_SIZE="40G"
+JENKINS_SIZE="10G"
 
 log() {
     echo "[$(date '+%F %T')] $*"
@@ -74,23 +51,32 @@ die() {
     echo
     echo "[ERROR] $*" >&2
     echo "[ERROR] Bootstrap failed."
-    echo "[ERROR] Log: $LOG_FILE"
+    echo "[ERROR] Log: ${LOG_FILE}"
     exit 1
 }
 
-trap 'rc=$?; if [[ $rc -ne 0 ]]; then echo "[ERROR] Failed at line ${LINENO} with exit code ${rc}"; fi' ERR
+trap 'rc=$?; if [[ $rc -ne 0 ]]; then echo "[ERROR] Failed at line ${LINENO}, exit code ${rc}" >&2; fi' ERR
 
 # ============================================================
-# Root check
+# ROOT CHECK
 # ============================================================
 
 [[ "$EUID" -eq 0 ]] || die "Run this script as root."
 
+mkdir -p "$(dirname "$LOG_FILE")"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo
+echo "============================================================"
+echo " OEC JAVA SUITE - SERVER BOOTSTRAP"
+echo "============================================================"
+
 # ============================================================
-# OS detection
+# OS DETECTION
 # ============================================================
 
-[[ -r /etc/os-release ]] || die "Cannot determine operating system."
+[[ -r /etc/os-release ]] || die "Cannot determine OS."
 
 source /etc/os-release
 
@@ -100,9 +86,9 @@ case "${ID}" in
         ;;
 
     amzn)
-        if [[ "${VERSION_ID}" != 2023* ]]; then
+        [[ "${VERSION_ID}" == 2023* ]] || \
             die "Unsupported Amazon Linux version: ${VERSION_ID}"
-        fi
+
         log "OS: ${PRETTY_NAME}"
         ;;
 
@@ -112,202 +98,434 @@ case "${ID}" in
 esac
 
 # ============================================================
-# Root filesystem verification
+# BASIC PACKAGE INSTALLATION
 # ============================================================
 
-ROOT_SOURCE="$(findmnt -n -o SOURCE /)"
-ROOT_FSTYPE="$(findmnt -n -o FSTYPE /)"
-
-log "Root filesystem: ${ROOT_SOURCE}"
-log "Root filesystem type: ${ROOT_FSTYPE}"
-
-[[ "$ROOT_FSTYPE" == "xfs" ]] || \
-    die "Root filesystem must be XFS. Detected: ${ROOT_FSTYPE}"
-
-# ============================================================
-# Disk space verification
-# ============================================================
-
-AVAILABLE_KB="$(df -Pk / | awk 'NR==2 {print $4}')"
-
-# Need slightly more than 50 GB because the two filesystem
-# images themselves consume 50 GB on the root filesystem.
-REQUIRED_KB=$((52 * 1024 * 1024))
-
-if (( AVAILABLE_KB < REQUIRED_KB )); then
-    die "Insufficient free space on root filesystem. Need at least ~52 GB free."
-fi
-
-log "Available root filesystem space: $((AVAILABLE_KB / 1024 / 1024)) GB"
-
-# ============================================================
-# Install basic packages
-# ============================================================
-
-log "Installing required packages"
+log "Installing required packages..."
 
 dnf install -y \
-    util-linux \
-    grep \
-    gawk \
+    cloud-utils-growpart \
+    lvm2 \
     xfsprogs \
+    rsync \
     curl \
     wget \
     ca-certificates \
-    tar \
-    gzip \
-    fontconfig
+    dnf-plugins-core \
+    gawk \
+    grep \
+    util-linux
 
 # ============================================================
-# Create filesystem image helper
+# DISK DISCOVERY
 # ============================================================
 
-create_xfs_image() {
+echo
+echo "=== CURRENT DISK LAYOUT ==="
 
-    local IMAGE="$1"
-    local SIZE="$2"
-    local LABEL="$3"
+lsblk
 
-    if [[ -e "$IMAGE" ]]; then
-        log "Filesystem image already exists: $IMAGE"
+echo
+echo "=== CURRENT VOLUME GROUP ==="
+
+vgs || true
+
+echo
+echo "=== CURRENT LOGICAL VOLUMES ==="
+
+lvs || true
+
+# ============================================================
+# VALIDATE EXPECTED ROOT DISK
+# ============================================================
+
+ROOT_SOURCE="$(findmnt -n -o SOURCE /)"
+
+log "Root filesystem: ${ROOT_SOURCE}"
+
+ROOT_FSTYPE="$(findmnt -n -o FSTYPE /)"
+
+log "Root filesystem type: ${ROOT_FSTYPE}"
+
+[[ "${ROOT_FSTYPE}" == "xfs" ]] || \
+    die "Root filesystem must be XFS."
+
+# ============================================================
+# DETECT ROOTVG
+# ============================================================
+
+if ! vgs RootVG >/dev/null 2>&1; then
+    die "RootVG was not found. Refusing to modify disk layout."
+fi
+
+log "RootVG detected."
+
+# ============================================================
+# DETECT ROOT PHYSICAL VOLUME
+# ============================================================
+
+ROOT_PV="$(pvs --noheadings -o pv_name,vg_name | awk '$2=="RootVG" {print $1; exit}')"
+
+[[ -n "${ROOT_PV}" ]] || \
+    die "Could not determine RootVG physical volume."
+
+log "RootVG physical volume: ${ROOT_PV}"
+
+# ============================================================
+# EXPAND PARTITION ONLY IF NEEDED
+#
+# For your current server this is:
+#   /dev/nvme0n1p4
+#
+# We derive it from the PV rather than hard-coding p4.
+# ============================================================
+
+PV_DISK=""
+PV_PARTITION=""
+
+if [[ "${ROOT_PV}" =~ ^(/dev/nvme[0-9]+n[0-9]+)p([0-9]+)$ ]]; then
+
+    PV_DISK="${BASH_REMATCH[1]}"
+    PV_PARTITION="${BASH_REMATCH[2]}"
+
+elif [[ "${ROOT_PV}" =~ ^(/dev/[a-z]+)([0-9]+)$ ]]; then
+
+    PV_DISK="${BASH_REMATCH[1]}"
+    PV_PARTITION="${BASH_REMATCH[2]}"
+
+else
+    die "Could not determine parent disk for ${ROOT_PV}"
+fi
+
+log "PV disk: ${PV_DISK}"
+log "PV partition: ${PV_PARTITION}"
+
+# ============================================================
+# CHECK WHETHER PARTITION ALREADY USES DISK
+# ============================================================
+
+DISK_SIZE_BYTES="$(blockdev --getsize64 "${PV_DISK}")"
+PV_PARTITION_SIZE_BYTES="$(blockdev --getsize64 "${ROOT_PV}")"
+
+log "Disk size: ${DISK_SIZE_BYTES} bytes"
+log "PV partition size: ${PV_PARTITION_SIZE_BYTES} bytes"
+
+if (( PV_PARTITION_SIZE_BYTES < DISK_SIZE_BYTES )); then
+
+    log "Unused space detected after PV partition."
+    log "Attempting to expand partition ${PV_PARTITION}."
+
+    growpart "${PV_DISK}" "${PV_PARTITION}" || true
+
+else
+
+    log "PV partition already consumes available disk space."
+fi
+
+# ============================================================
+# RESCAN PARTITION TABLE
+# ============================================================
+
+partprobe "${PV_DISK}" || true
+
+udevadm settle || true
+
+sleep 2
+
+# ============================================================
+# RESIZE PHYSICAL VOLUME
+# ============================================================
+
+log "Running pvresize..."
+
+pvresize "${ROOT_PV}"
+
+echo
+echo "=== VOLUME GROUP AFTER PVRESIZE ==="
+
+vgs RootVG
+
+# ============================================================
+# CHECK AVAILABLE VG SPACE
+# ============================================================
+
+VG_FREE_BYTES="$(vgs --noheadings --units b --nosuffix -o vg_free RootVG | tr -d ' ')"
+
+log "RootVG free space: ${VG_FREE_BYTES} bytes"
+
+REQUIRED_BYTES=$((50 * 1024 * 1024 * 1024))
+
+if (( VG_FREE_BYTES < REQUIRED_BYTES )); then
+    die "RootVG does not have enough free space for 40G Docker + 10G Jenkins."
+fi
+
+# ============================================================
+# CREATE DOCKER LV ONLY IF MISSING
+# ============================================================
+
+echo
+echo "=== DOCKER STORAGE ==="
+
+if lvs "${DOCKER_LV}" >/dev/null 2>&1; then
+
+    log "Docker LV already exists: ${DOCKER_LV}"
+
+else
+
+    log "Creating ${DOCKER_SIZE} Docker LV..."
+
+    lvcreate \
+        -L "${DOCKER_SIZE}" \
+        -n dockerVol \
+        RootVG
+
+fi
+
+# ============================================================
+# CREATE JENKINS LV ONLY IF MISSING
+# ============================================================
+
+echo
+echo "=== JENKINS STORAGE ==="
+
+if lvs "${JENKINS_LV}" >/dev/null 2>&1; then
+
+    log "Jenkins LV already exists: ${JENKINS_LV}"
+
+else
+
+    log "Creating ${JENKINS_SIZE} Jenkins LV..."
+
+    lvcreate \
+        -L "${JENKINS_SIZE}" \
+        -n jenkinsVol \
+        RootVG
+
+fi
+
+# ============================================================
+# FORMAT DOCKER LV ONLY IF NO FILESYSTEM EXISTS
+# ============================================================
+
+echo
+echo "=== DOCKER FILESYSTEM ==="
+
+DOCKER_FS="$(blkid -o value -s TYPE "${DOCKER_LV}" 2>/dev/null || true)"
+
+if [[ -z "${DOCKER_FS}" ]]; then
+
+    log "Formatting Docker LV as XFS..."
+
+    mkfs.xfs \
+        -L docker-data \
+        "${DOCKER_LV}"
+
+elif [[ "${DOCKER_FS}" == "xfs" ]]; then
+
+    log "Docker LV already contains XFS. NOT formatting."
+
+else
+
+    die "Docker LV contains unsupported filesystem: ${DOCKER_FS}"
+
+fi
+
+# ============================================================
+# FORMAT JENKINS LV ONLY IF NO FILESYSTEM EXISTS
+# ============================================================
+
+echo
+echo "=== JENKINS FILESYSTEM ==="
+
+JENKINS_FS="$(blkid -o value -s TYPE "${JENKINS_LV}" 2>/dev/null || true)"
+
+if [[ -z "${JENKINS_FS}" ]]; then
+
+    log "Formatting Jenkins LV as XFS..."
+
+    mkfs.xfs \
+        -L jenkins-data \
+        "${JENKINS_LV}"
+
+elif [[ "${JENKINS_FS}" == "xfs" ]]; then
+
+    log "Jenkins LV already contains XFS. NOT formatting."
+
+else
+
+    die "Jenkins LV contains unsupported filesystem: ${JENKINS_FS}"
+
+fi
+
+# ============================================================
+# CREATE MOUNT POINTS
+# ============================================================
+
+mkdir -p "${DOCKER_MOUNT}"
+mkdir -p "${JENKINS_MOUNT}"
+
+# ============================================================
+# STOP SERVICES BEFORE MIGRATION
+# ============================================================
+
+systemctl stop docker 2>/dev/null || true
+systemctl stop jenkins 2>/dev/null || true
+
+# ============================================================
+# MOUNT TEMPORARY STORAGE
+# ============================================================
+
+mkdir -p /mnt/oec-docker
+mkdir -p /mnt/oec-jenkins
+
+if ! mountpoint -q /mnt/oec-docker; then
+    mount "${DOCKER_LV}" /mnt/oec-docker
+fi
+
+if ! mountpoint -q /mnt/oec-jenkins; then
+    mount "${JENKINS_LV}" /mnt/oec-jenkins
+fi
+
+# ============================================================
+# MIGRATE EXISTING DOCKER DATA
+#
+# ONLY if Docker mount is not already active.
+# ============================================================
+
+if mountpoint -q "${DOCKER_MOUNT}"; then
+
+    log "${DOCKER_MOUNT} already mounted. Skipping migration."
+
+else
+
+    if find "${DOCKER_MOUNT}" \
+        -mindepth 1 \
+        -maxdepth 1 \
+        -print -quit 2>/dev/null | grep -q .; then
+
+        log "Existing Docker data detected."
+        log "Migrating Docker data to 40G LV..."
+
+        rsync -aHAX \
+            "${DOCKER_MOUNT}/" \
+            /mnt/oec-docker/
+
     else
-        log "Creating ${SIZE} filesystem image: ${IMAGE}"
 
-        fallocate -l "$SIZE" "$IMAGE" || \
-            die "Failed to allocate ${IMAGE}"
+        log "No existing Docker data found."
 
-        chmod 0600 "$IMAGE"
     fi
+fi
 
-    # Check whether this is already an XFS filesystem.
-    if ! blkid "$IMAGE" >/dev/null 2>&1; then
-        log "Formatting ${IMAGE} as XFS"
+# ============================================================
+# MIGRATE EXISTING JENKINS DATA
+# ============================================================
 
-        mkfs.xfs -f -L "$LABEL" "$IMAGE" || \
-            die "Failed to format ${IMAGE}"
+if mountpoint -q "${JENKINS_MOUNT}"; then
+
+    log "${JENKINS_MOUNT} already mounted. Skipping migration."
+
+else
+
+    if find "${JENKINS_MOUNT}" \
+        -mindepth 1 \
+        -maxdepth 1 \
+        -print -quit 2>/dev/null | grep -q .; then
+
+        log "Existing Jenkins data detected."
+        log "Migrating Jenkins data to 10G LV..."
+
+        rsync -aHAX \
+            "${JENKINS_MOUNT}/" \
+            /mnt/oec-jenkins/
+
     else
-        EXISTING_FS="$(blkid -o value -s TYPE "$IMAGE" || true)"
 
-        if [[ "$EXISTING_FS" != "xfs" ]]; then
-            die "${IMAGE} exists but is not XFS."
-        fi
+        log "No existing Jenkins data found."
 
-        log "${IMAGE} already contains an XFS filesystem."
     fi
-}
+fi
 
 # ============================================================
-# Create Docker filesystem
+# UNMOUNT TEMPORARY STORAGE
 # ============================================================
 
-log "Preparing Docker filesystem"
-
-mkdir -p "$DOCKER_DIR"
-
-create_xfs_image \
-    "$DOCKER_IMAGE" \
-    "$DOCKER_SIZE" \
-    "docker-data"
+umount /mnt/oec-docker || true
+umount /mnt/oec-jenkins || true
 
 # ============================================================
-# Create Jenkins filesystem
+# FSTAB MANAGEMENT
 # ============================================================
 
-log "Preparing Jenkins filesystem"
+log "Configuring /etc/fstab..."
 
-mkdir -p "$JENKINS_HOME"
+cp /etc/fstab "/etc/fstab.backup.$(date +%Y%m%d%H%M%S)"
 
-create_xfs_image \
-    "$JENKINS_IMAGE" \
-    "$JENKINS_SIZE" \
-    "jenkins-data"
+# Remove old entries for these mount points only.
+sed -i '\|[[:space:]]/var/lib/docker[[:space:]]|d' /etc/fstab
+sed -i '\|[[:space:]]/srv/jenkins[[:space:]]|d' /etc/fstab
 
-# ============================================================
-# Configure /etc/fstab
-# ============================================================
-
-log "Configuring persistent mounts"
-
-touch /etc/fstab
-
-add_fstab_entry() {
-
-    local IMAGE="$1"
-    local MOUNT="$2"
-    local OPTIONS="$3"
-
-    if grep -qE "^[^#]*[[:space:]]${MOUNT}[[:space:]]" /etc/fstab; then
-        log "fstab entry already exists for ${MOUNT}"
-    else
-        echo "${IMAGE} ${MOUNT} xfs ${OPTIONS} 0 0" >> /etc/fstab
-        log "Added fstab entry for ${MOUNT}"
-    fi
-}
-
-add_fstab_entry \
-    "$DOCKER_IMAGE" \
-    "$DOCKER_DIR" \
-    "loop"
-
-add_fstab_entry \
-    "$JENKINS_IMAGE" \
-    "$JENKINS_HOME" \
-    "loop"
+cat >> /etc/fstab <<'EOF'
+LABEL=docker-data  /var/lib/docker  xfs  defaults  0 0
+LABEL=jenkins-data /srv/jenkins     xfs  defaults  0 0
+EOF
 
 # ============================================================
-# Mount filesystems
+# MOUNT FINAL FILESYSTEMS
 # ============================================================
 
-mount_filesystem() {
+log "Mounting Docker filesystem..."
 
-    local MOUNT="$1"
+if mountpoint -q "${DOCKER_MOUNT}"; then
+    log "${DOCKER_MOUNT} already mounted."
+else
+    mount "${DOCKER_MOUNT}"
+fi
 
-    if mountpoint -q "$MOUNT"; then
-        log "${MOUNT} is already mounted."
-    else
-        log "Mounting ${MOUNT}"
+log "Mounting Jenkins filesystem..."
 
-        mount "$MOUNT" || \
-            die "Failed to mount ${MOUNT}"
-    fi
-}
-
-mount_filesystem "$DOCKER_DIR"
-mount_filesystem "$JENKINS_HOME"
+if mountpoint -q "${JENKINS_MOUNT}"; then
+    log "${JENKINS_MOUNT} already mounted."
+else
+    mount "${JENKINS_MOUNT}"
+fi
 
 # ============================================================
-# Verify mounts
+# VERIFY MOUNTS
 # ============================================================
 
-DOCKER_FSTYPE="$(findmnt -n -o FSTYPE "$DOCKER_DIR")"
-JENKINS_FSTYPE="$(findmnt -n -o FSTYPE "$JENKINS_HOME")"
+DOCKER_FSTYPE="$(findmnt -n -o FSTYPE "${DOCKER_MOUNT}")"
+JENKINS_FSTYPE="$(findmnt -n -o FSTYPE "${JENKINS_MOUNT}")"
 
-[[ "$DOCKER_FSTYPE" == "xfs" ]] || \
-    die "${DOCKER_DIR} is not mounted as XFS."
+[[ "${DOCKER_FSTYPE}" == "xfs" ]] || \
+    die "Docker filesystem is not XFS."
 
-[[ "$JENKINS_FSTYPE" == "xfs" ]] || \
-    die "${JENKINS_HOME} is not mounted as XFS."
+[[ "${JENKINS_FSTYPE}" == "xfs" ]] || \
+    die "Jenkins filesystem is not XFS."
 
 log "Docker filesystem mounted successfully."
 log "Jenkins filesystem mounted successfully."
 
 # ============================================================
-# Docker installation
+# DOCKER INSTALLATION
 # ============================================================
 
-log "Installing Docker"
+echo
+echo "=== DOCKER INSTALLATION ==="
 
-if [[ "$ID" == "rhel" ]]; then
+if command -v docker >/dev/null 2>&1; then
 
-    dnf install -y dnf-plugins-core
+    log "Docker already installed."
 
-    if ! dnf repolist | grep -q "docker-ce"; then
-        log "Adding Docker CE repository"
+else
 
-        dnf config-manager \
-            --add-repo \
-            https://download.docker.com/linux/rhel/docker-ce.repo
-    fi
+    log "Installing Docker CE repository..."
+
+    dnf config-manager \
+        --add-repo \
+        https://download.docker.com/linux/rhel/docker-ce.repo
+
+    log "Installing Docker CE..."
 
     dnf install -y \
         docker-ce \
@@ -316,17 +534,11 @@ if [[ "$ID" == "rhel" ]]; then
         docker-buildx-plugin \
         docker-compose-plugin
 
-else
-
-    dnf install -y docker
-
 fi
 
 # ============================================================
-# Docker configuration
+# DOCKER CONFIGURATION
 # ============================================================
-
-log "Configuring Docker"
 
 mkdir -p /etc/docker
 
@@ -339,40 +551,45 @@ EOF
 chmod 0644 /etc/docker/daemon.json
 
 # ============================================================
-# Docker service
+# DOCKER SERVICE
 # ============================================================
-
-log "Starting Docker"
 
 systemctl daemon-reload
 systemctl enable docker
-systemctl restart docker
 
-systemctl is-active --quiet docker || \
-    die "Docker failed to start."
+log "Starting Docker..."
 
-# ============================================================
-# Docker verification
-# ============================================================
+if ! systemctl restart docker; then
 
-DOCKER_ROOT="$(
-    docker info \
-        --format '{{.DockerRootDir}}' \
-        2>/dev/null || true
-)"
+    echo
+    echo "============================================================"
+    echo " Docker did not start."
+    echo " This may be because a new kernel was installed."
+    echo " The system may require ONE reboot."
+    echo "============================================================"
 
-[[ "$DOCKER_ROOT" == "$DOCKER_DIR" ]] || \
-    die "Docker root is '${DOCKER_ROOT}', expected '${DOCKER_DIR}'."
+    systemctl status docker --no-pager || true
 
-log "Docker root: ${DOCKER_ROOT}"
+fi
 
 # ============================================================
-# Jenkins installation
+# JAVA 21
 # ============================================================
 
-log "Installing Jenkins LTS"
+echo
+echo "=== JAVA 21 ==="
 
-# Current Jenkins LTS repository key.
+dnf install -y java-21-openjdk
+
+java -version
+
+# ============================================================
+# JENKINS REPOSITORY
+# ============================================================
+
+echo
+echo "=== JENKINS REPOSITORY ==="
+
 rpm --import \
     https://pkg.jenkins.io/rpm-stable/jenkins.io-2026.key
 
@@ -387,136 +604,160 @@ EOF
 
 dnf clean metadata
 
-dnf install -y java-21-openjdk
-
-dnf install -y jenkins
-
 # ============================================================
-# Jenkins filesystem ownership
+# JENKINS INSTALLATION
 # ============================================================
 
-log "Configuring Jenkins filesystem"
+echo
+echo "=== JENKINS INSTALLATION ==="
 
-id jenkins >/dev/null 2>&1 || \
-    die "Jenkins user was not created by Jenkins package."
+if rpm -q jenkins >/dev/null 2>&1; then
 
-chown -R jenkins:jenkins "$JENKINS_HOME"
+    log "Jenkins already installed."
 
-chmod 0755 "$JENKINS_HOME"
+else
 
-# ============================================================
-# Jenkins JENKINS_HOME configuration
-# ============================================================
-
-log "Configuring JENKINS_HOME=${JENKINS_HOME}"
-
-mkdir -p /etc/systemd/system/jenkins.service.d
-
-cat > /etc/systemd/system/jenkins.service.d/override.conf <<EOF
-[Service]
-Environment="JENKINS_HOME=${JENKINS_HOME}"
-EOF
-
-systemctl daemon-reload
-
-# ============================================================
-# Jenkins service
-# ============================================================
-
-log "Starting Jenkins"
-
-systemctl enable jenkins
-systemctl restart jenkins
-
-# Give Jenkins a little time to initialize.
-sleep 10
-
-if ! systemctl is-active --quiet jenkins; then
-
-    log "Jenkins did not become active."
-
-    systemctl status jenkins --no-pager || true
-
-    journalctl -u jenkins \
-        --no-pager \
-        -n 50 || true
-
-    die "Jenkins failed to start."
+    dnf install -y jenkins
 
 fi
 
 # ============================================================
-# Final verification
+# JENKINS HOME
+# ============================================================
+
+echo
+echo "=== JENKINS HOME ==="
+
+mkdir -p /etc/systemd/system/jenkins.service.d
+
+cat > /etc/systemd/system/jenkins.service.d/override.conf <<'EOF'
+[Service]
+Environment="JENKINS_HOME=/srv/jenkins"
+EOF
+
+id jenkins >/dev/null 2>&1 || \
+    die "Jenkins user does not exist."
+
+chown -R jenkins:jenkins /srv/jenkins
+chmod 0755 /srv/jenkins
+
+# ============================================================
+# SYSTEMD
+# ============================================================
+
+systemctl daemon-reload
+
+systemctl enable jenkins
+
+log "Starting Jenkins..."
+
+if ! systemctl restart jenkins; then
+
+    echo
+    echo "Jenkins failed to start."
+    echo
+
+    systemctl status jenkins --no-pager || true
+
+    journalctl \
+        -u jenkins \
+        -n 50 \
+        --no-pager || true
+
+fi
+
+sleep 10
+
+# ============================================================
+# FINAL VERIFICATION
 # ============================================================
 
 echo
 echo "============================================================"
-echo "OEC JAVA SUITE SERVER"
-echo "BOOTSTRAP COMPLETE"
+echo " FINAL SERVER VERIFICATION"
 echo "============================================================"
 
 echo
-echo "OS:"
-cat /etc/redhat-release 2>/dev/null || true
+echo "=== DISK ==="
+lsblk
 
 echo
-echo "ROOT:"
+echo "=== VOLUME GROUP ==="
+vgs RootVG
+
+echo
+echo "=== LOGICAL VOLUMES ==="
+lvs RootVG
+
+echo
+echo "=== ROOT ==="
 df -hT /
 
 echo
-echo "DOCKER:"
-df -hT "$DOCKER_DIR"
+echo "=== DOCKER STORAGE ==="
+df -hT "${DOCKER_MOUNT}"
+findmnt "${DOCKER_MOUNT}"
 
 echo
-echo "JENKINS:"
-df -hT "$JENKINS_HOME"
+echo "=== JENKINS STORAGE ==="
+df -hT "${JENKINS_MOUNT}"
+findmnt "${JENKINS_MOUNT}"
 
 echo
-echo "MOUNTS:"
-findmnt "$DOCKER_DIR"
-findmnt "$JENKINS_HOME"
+echo "=== DOCKER SERVICE ==="
+systemctl is-enabled docker || true
+systemctl is-active docker || true
 
 echo
-echo "DOCKER ROOT:"
-docker info --format 'Docker Root Dir: {{.DockerRootDir}}'
+echo "=== DOCKER VERSION ==="
+docker --version || true
 
 echo
-echo "DOCKER VERSION:"
-docker --version
+echo "=== DOCKER COMPOSE ==="
+docker compose version || true
 
 echo
-echo "DOCKER COMPOSE:"
-docker compose version
+echo "=== DOCKER ROOT ==="
+docker info \
+    --format 'Docker Root Dir: {{.DockerRootDir}}' \
+    2>/dev/null || true
 
 echo
-echo "JAVA:"
+echo "=== JAVA ==="
 java -version
 
 echo
-echo "JENKINS:"
-systemctl is-active jenkins
-systemctl is-enabled jenkins
+echo "=== JENKINS SERVICE ==="
+systemctl is-enabled jenkins || true
+systemctl is-active jenkins || true
 
 echo
-echo "JENKINS_HOME:"
+echo "=== JENKINS HOME ==="
 systemctl show jenkins \
     --property=Environment \
     --no-pager
 
 echo
-echo "STORAGE LIMITS:"
-echo "  Docker  : ${DOCKER_SIZE}"
-echo "  Jenkins : ${JENKINS_SIZE}"
-echo "  Root    : remaining capacity"
+echo "============================================================"
+echo " OEC JAVA SUITE BOOTSTRAP COMPLETE"
+echo "============================================================"
 
 echo
-echo "============================================================"
-echo "No secondary EBS used."
-echo "No LVM used."
-echo "No XFS project quota used."
-echo "No disk repartitioning performed."
-echo "No reboot required."
-echo "PostgreSQL not installed."
-echo "SSM not installed."
-echo "Java/TM application not deployed."
+echo "Storage:"
+echo "  /var/lib/docker -> 40 GB XFS LV"
+echo "  /srv/jenkins    -> 10 GB XFS LV"
+echo
+echo "Software:"
+echo "  Docker CE"
+echo "  Docker Compose"
+echo "  Java 21"
+echo "  Jenkins LTS"
+echo
+echo "Infrastructure:"
+echo "  Existing 100 GB EBS"
+echo "  No secondary EBS"
+echo "  No SSM"
+echo "  No PostgreSQL"
+echo "  No application deployment"
+echo
 echo "============================================================"
