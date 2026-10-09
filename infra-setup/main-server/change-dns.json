@@ -1,0 +1,18 @@
+{
+  "Comment": "Reapply current EC2 public IP",
+  "Changes": [
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "oec-tm.stacklycloud.com",
+        "Type": "A",
+        "TTL": 60,
+        "ResourceRecords": [
+          {
+            "Value": "16.113.19.253"
+          }
+        ]
+      }
+    }
+  ]
+}
